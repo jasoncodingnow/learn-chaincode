@@ -77,6 +77,10 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string
 	var Aval int
 	var err error
 
+	if len(args) > 1 {
+		fmt.Printf("args[0] is %s", args[0])
+	}
+
 	if len(args) != 1 {
 		return nil, errors.New("Incorrect number of arguments. Expecting 1")
 	}
@@ -95,6 +99,9 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string
 
 	var empty []string
 	jsonAsBytes, _ := json.Marshal(empty) //marshal an emtpy array of strings to clear the index
+	teststr := string(jsonAsBytes)
+	fmt.Printf("jsonArBytes is %s", teststr)
+
 	err = stub.PutState(marbleIndexStr, jsonAsBytes)
 	if err != nil {
 		return nil, err
@@ -102,6 +109,9 @@ func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface, function string
 
 	var trades AllTrades
 	jsonAsBytes, _ = json.Marshal(trades) //clear the open trade struct
+	tradestr := string(jsonAsBytes)
+	fmt.Printf("trades is %s", tradestr)
+
 	err = stub.PutState(openTradesStr, jsonAsBytes)
 	if err != nil {
 		return nil, err
