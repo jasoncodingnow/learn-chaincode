@@ -306,6 +306,9 @@ func (t *SimpleChaincode) init_marble(stub shim.ChaincodeStubInterface, args []s
 		return nil, errors.New("This marble arleady exists") //all stop a marble by this name exists
 	}
 
+	fmt.Println("current marble is ")
+	fmt.Println(res)
+
 	//build the marble json string manually
 	str := `{"name": "` + name + `", "color": "` + color + `", "size": ` + strconv.Itoa(size) + `, "user": "` + user + `"}`
 	err = stub.PutState(name, []byte(str)) //store marble with id as key
@@ -320,6 +323,9 @@ func (t *SimpleChaincode) init_marble(stub shim.ChaincodeStubInterface, args []s
 	}
 	var marbleIndex []string
 	json.Unmarshal(marblesAsBytes, &marbleIndex) //un stringify it aka JSON.parse()
+
+	fmt.Println("marbleIndex is ")
+	fmt.Println(marbleIndex)
 
 	//append
 	marbleIndex = append(marbleIndex, name) //add marble name to index list
