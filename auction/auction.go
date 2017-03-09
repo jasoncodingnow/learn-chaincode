@@ -409,21 +409,21 @@ func QueryFromLedger(stub shim.ChaincodeStubInterface, tableName string, args []
 
 // ProcessQueryResult: check if correct
 func ProcessQueryResult(stub shim.ChaincodeStubInterface, bytes []byte, args []string) error {
-	var dat map[string]interface{}
-	if err := json.Unmarshal(bytes, &dat); err != nil {
-		panic(err)
-	}
+	// var dat map[string]interface{}
+	// if err := json.Unmarshal(bytes, &dat); err != nil {
+	// 	panic(err)
+	// }
 
-	var recType string
-	recType = dat["RecTYpe"].(string)
-	switch recType {
-	case "USER":
-		_, err := JsonToUser(bytes)
-		if err != nil {
-			return err
-		}
-		return err
-	}
+	// var recType string
+	// recType = dat["RecTYpe"].(string)
+	// switch recType {
+	// case "USER":
+	// 	_, err := JsonToUser(bytes)
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// 	return err
+	// }
 	return nil
 }
 
