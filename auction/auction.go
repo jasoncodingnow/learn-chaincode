@@ -198,6 +198,35 @@ func ChkReqType(args []string) bool {
 	return false
 }
 
+//////////////////////////////////////////////////////////////////////////////////////////
+// Retrieve Auction applications version Information
+// This API is to check whether application has been deployed successfully or not
+// example:
+// ./peer chaincode query -l golang -n mycc -c '{"Function": "GetVersion", "Args": ["version"]}'
+//
+//////////////////////////////////////////////////////////////////////////////////////////
+func GetVersion(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+	if len(args) < 1 {
+		fmt.Println("GetVersion() : Requires 1 argument 'version'")
+		return nil, errors.New("GetVersion() : Requires 1 argument 'version'")
+	}
+	// Get version from the ledger
+	version, err := stub.GetState(args[0])
+	if err != nil {
+		jsonResp := "{\"Error\":\"Failed to get state for version\"}"
+		return nil, errors.New(jsonResp)
+	}
+
+	if version == nil {
+		jsonResp := "{\"Error\":\" auction application version is invalid\"}"
+		return nil, errors.New(jsonResp)
+	}
+
+	jsonResp := "{\"version\":\"" + string(version) + "\"}"
+	fmt.Printf("Query Response:%s\n", jsonResp)
+	return version, nil
+}
+
 // Post User
 func PostUser(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
 	user, err := CreateUserObject(args[0:])
