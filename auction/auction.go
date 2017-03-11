@@ -18,6 +18,8 @@ import (
 	"bufio"
 	"net/http"
 
+	"time"
+
 	"github.com/hyperledger/fabric/core/chaincode/shim"
 )
 
@@ -108,6 +110,39 @@ type ItemObject struct {
 	ItemImageType  string // should be used to regenerate the appropriate image type
 	ItemBasePrice  string // Reserve Price at Auction must be greater than this price
 	CurrentOwnerID string // This is validated for a user registered record
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Has an item entry every time the item changes hands
+////////////////////////////////////////////////////////////////////////////////
+type ItemLog struct {
+	ItemID       string // PRIMARY KEY
+	Status       string // SECONDARY KEY - OnAuc, OnSale, NA
+	AuctionedBy  string // SECONDARY KEY - Auction House ID if applicable
+	RecType      string // ITEMHIS
+	ItemDesc     string
+	CurrentOwner string
+	Date         string // Date when status changed
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Register a request for participating in an auction
+// Usually posted by a seller who owns a piece of ITEM
+// The Auction house will determine when to open the item for Auction
+// The Auction House may conduct an appraisal and genuineness of the item
+/////////////////////////////////////////////////////////////////////////////
+type AuctionRequest struct {
+	AuctionID      string
+	RecType        string // AUCREQ
+	ItemID         string
+	AuctionHouseID string // ID of the Auction House managing the auction
+	SellerID       string // ID Of Seller - to verified against the Item CurrentOwnerId
+	RequestDate    string // Date on which Auction Request was filed
+	ReservePrice   string // reserver price > previous purchase price
+	BuyItNowPrice  string // 0 (Zero) if not applicable else specify price
+	Status         string // INIT, OPEN, CLOSED (To be Updated by Trgger Auction)
+	OpenDate       string // Date on which auction will occur (To be Updated by Trigger Auction)
+	CloseDate      string // Date and time when Auction will close (To be Updated by Trigger Auction)
 }
 
 //////////////////////////////////////////////////////////////
@@ -457,6 +492,268 @@ func ValidateMember(stub shim.ChaincodeStubInterface, owner string) ([]byte, err
 	return databytes, nil
 }
 
+// PostAuctionRequest owner post auction request
+func PostAuctionRequest(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+	aucReg, err := CreateAuctionRequest(args)
+	if err != nil {
+		return nil, err
+	}
+
+	err = VerifyIfItemIsOnAuction(stub, aucReg.ItemID)
+	if err != nil {
+		fmt.Println("PostAuctionRequest() : Failed Item is either initiated or opened for Auction ", args[0])
+		return nil, err
+	}
+
+	aucHouse, err := ValidateMember(stub, aucReg.AuctionHouseID)
+	fmt.Println("Auction House information  ", aucHouse, " ID: ", aucReg.AuctionHouseID)
+	if err != nil {
+		fmt.Println("PostAuctionRequest() : Failed Auction House not Registered in Blockchain ", aucReg.AuctionHouseID)
+		return nil, err
+	}
+
+	itemObject, err := ValidateItemSubmission(stub, aucReg.ItemID)
+	if err != nil {
+		fmt.Println("PostAuctionRequest() : Failed Could not Validate Item Object in Blockchain ", aucReg.ItemID)
+		return itemObject, err
+	}
+
+	buff, err := AucReqtoJSON(aucReg)
+	if err != nil {
+		fmt.Println("PostAuctionRequest() : Failed Cannot create object buffer for write : ", args[1])
+		return nil, errors.New("PostAuctionRequest(): Failed Cannot create object buffer for write : " + args[1])
+	} else {
+		keys := []string{args[0]}
+		err = UpdateLedger(stub, "AuctionTable", keys, buff)
+		if err != nil {
+			fmt.Println("PostAuctionRequest() : write error while inserting record\n")
+			return buff, err
+		}
+
+		io, err := JSONtoAR(itemObject)
+		_, err = PostItemLog(stub, io, "ReadyForAuc", aucReg.AuctionHouseID)
+		if err != nil {
+			fmt.Println("PostItemLog() : write error while inserting record\n")
+			return buff, err
+		}
+
+		keys = []string{"2017", args[0]}
+		err = UpdateLedger(stub, "AucInitTable", keys, buff)
+		if err != nil {
+			fmt.Println("PostAuctionRequest() : write error while inserting record into AucInitTable \n")
+			return buff, err
+		}
+	}
+	return buff, err
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// POSTS A LOG ENTRY Every Time the Item is transacted
+// Valid Status for ItemLog =  OnAuc, OnSale, NA, INITIAL
+// Valid AuctionedBy: This value is set to "DEFAULT" but when it is put on auction Auction House ID is assigned
+// PostItemLog IS NOT A PUBLIC API and is invoked every time some event happens in the Item's life
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+func PostItemLog(stub shim.ChaincodeStubInterface, item ItemObject, status string, ah string) ([]byte, error) {
+	iLog := ItemToItemLog(item)
+	iLog.Status = status
+	iLog.AuctionedBy = ah
+
+	buff, err := ItemLogtoJSON(iLog)
+	if err != nil {
+		fmt.Println("PostItemLog() : Failed Cannot create object buffer for write : ", item.ItemID)
+		return nil, errors.New("PostItemLog(): Failed Cannot create object buffer for write : " + item.ItemID)
+	} else {
+		keys := []string{iLog.ItemID, iLog.Status, iLog.AuctionedBy, iLog.Date}
+		err = UpdateLedger(stub, "ItemHistoryTable", keys, buff)
+		if err != nil {
+			fmt.Println("PostItemLog() : write error while inserting record\n")
+			return buff, err
+		}
+	}
+	return buff, err
+}
+
+func ItemLogtoJSON(iLog ItemLog) ([]byte, error) {
+	ajson, err := json.Marshal(iLog)
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+	return ajson, nil
+}
+
+func ItemToItemLog(io ItemObject) ItemLog {
+	iLog := ItemLog{}
+	iLog.ItemID = io.ItemID
+	iLog.Status = "INITIAL"
+	iLog.AuctionedBy = "DEFAULT"
+	iLog.RecType = "ILOG"
+	iLog.ItemDesc = io.ItemDesc
+	iLog.CurrentOwner = io.CurrentOwnerID
+	iLog.Date = time.Now().Format("2006-01-02 15:04:05")
+
+	return iLog
+}
+
+// CreateAuctionRequest
+func CreateAuctionRequest(args []string) (AuctionRequest, error) {
+	var err error
+	var aucReg AuctionRequest
+
+	if len(args) != 11 {
+		fmt.Println("CreateAuctionRegistrationObject(): Incorrect number of arguments. Expecting 11 ")
+		return aucReg, errors.New("CreateAuctionRegistrationObject() : Incorrect number of arguments. Expecting 11 ")
+	}
+
+	_, err = strconv.Atoi(args[0])
+	if err != nil {
+		return aucReg, errors.New("CreateAuctionRequest() : User ID should be an integer")
+	}
+
+	aucReg = AuctionRequest{args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10]}
+	fmt.Println("CreateAuctionObject() : Auction Registration : ", aucReg)
+
+	return aucReg, nil
+}
+
+func VerifyIfItemIsOnAuction(stub shim.ChaincodeStubInterface, itemID string) error {
+	rows, err := GetListOfOpenAucs(stub, "AucOpenTable", []string{"2017"})
+	if err != nil {
+		return fmt.Errorf("VerifyIfItemIsOnAuction() operation failed. Error retrieving values from AucOpenTable: %s", err)
+	}
+	tlist := make([]AuctionRequest, len(rows))
+	err = json.Unmarshal([]byte(rows), &tlist)
+	if err != nil {
+		fmt.Println("VerifyIfItemIsOnAuction: Unmarshal failed : ", err)
+		return fmt.Errorf("VerifyIfItemIsOnAuction: operation failed. Error un-marshaling JSON: %s", err)
+	}
+
+	for i := 0; i < len(tlist); i++ {
+		ar := tlist[i]
+		if ar.ItemID == itemID {
+			fmt.Println("VerifyIfItemIsOnAuction() : Item Exists")
+			return fmt.Errorf("VerifyIfItemIsOnAuction() operation failed. %s", itemID)
+		}
+	}
+
+	rows, err = GetListOfInitAucs(stub, "AucInitTable", []string{"2017"})
+	if err != nil {
+		return fmt.Errorf("VerifyIfItemIsOnAuction() operation failed. Error retrieving values from AucInitTable: %s", err)
+	}
+
+	tlist = make([]AuctionRequest, len(rows))
+	err = json.Unmarshal([]byte(rows), &tlist)
+	if err != nil {
+		fmt.Println("VerifyIfItemIsOnAuction() Unmarshal failed : ", err)
+		return fmt.Errorf("VerifyIfItemIsOnAuction: operation failed. Error un-marshaling JSON: %s", err)
+	}
+	for i := 0; i < len(rows); i++ {
+		ar := tlist[i]
+		if ar.ItemID == itemID {
+			return fmt.Errorf("VerifyIfItemIsOnAuction() operation failed.")
+		}
+	}
+	return nil
+}
+
+// ValidateItemSubmission
+func ValidateItemSubmission(stub shim.ChaincodeStubInterface, artId string) ([]byte, error) {
+	args := []string{artId, "ARTINV"}
+	databytes, err := QueryFromLedger(stub, "ItemTable", args)
+	if err != nil {
+		fmt.Println("ValidateItemSubmission() : Failed - Cannot find valid owner record for ART  ", artId)
+		jsonResp := "{\"Error\":\"Failed to get Owner Object Data for " + artId + "\"}"
+		return nil, errors.New(jsonResp)
+	}
+
+	if databytes == nil {
+		fmt.Println("ValidateItemSubmission() : Failed - Incomplete owner record for ART  ", artId)
+		jsonResp := "{\"Error\":\"Failed - Incomplete information about the owner for " + artId + "\"}"
+		return nil, errors.New(jsonResp)
+	}
+
+	//fmt.Println("ValidateItemSubmission() : Validated Item Owner:", Avalbytes)
+	return databytes, nil
+}
+
+func GetListOfOpenAucs(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+	rows, err := GetList(stub, "AucOpenTable", args)
+	if err != nil {
+		return nil, fmt.Errorf("GetListOfOpenAucs operation failed. Error marshaling JSON: %s", err)
+	}
+
+	nCol := GetNumberOfKeys("AucOpenTable")
+	tlist := make([]AuctionRequest, len(rows))
+	for i := 0; i < len(rows); i++ {
+		data := rows[i].Columns[nCol].GetBytes()
+		aq, err := JSONtoAucReq(data)
+		if err != nil {
+			fmt.Println("GetListOfOpenAucs() Failed : Ummarshall error")
+			return nil, fmt.Errorf("GetListOfOpenAucs() operation failed. %s", err)
+		}
+		tlist[i] = aq
+	}
+	jsonRows, _ := json.Marshal(tlist)
+	return jsonRows, nil
+}
+
+func GetListOfInitAucs(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+	rows, err := GetList(stub, "AucInitTable", args)
+	if err != nil {
+		return nil, fmt.Errorf("GetListOfInitAucs operation failed. Error marshaling JSON: %s", err)
+	}
+	nCol := GetNumberOfKeys("AucInitTable")
+	tlist := make([]AuctionRequest, len(rows))
+	for i := 0; i < len(rows); i++ {
+		data := rows[i].Columns[nCol].GetBytes()
+		ar, err := JSONtoAucReq(data)
+		if err != nil {
+			fmt.Println("GetListOfInitAucs() Failed : Ummarshall error")
+			return nil, fmt.Errorf("getBillForMonth() operation failed. %s", err)
+		}
+		tlist[i] = ar
+	}
+	jsonRows, _ := json.Marshal(tlist)
+	return jsonRows, nil
+}
+
+func GetList(stub shim.ChaincodeStubInterface, tableName string, args []string) ([]shim.Row, error) {
+	var columns []shim.Column
+
+	nKeys := GetNumberOfKeys(tableName)
+	if nKeys < 1 {
+		fmt.Println("Atleast 1 Key must be provided \n")
+		return nil, errors.New("GetList failed. Must include at least key values")
+	}
+	for i := 0; i < nKeys; i++ {
+		col := shim.Column{Value: &shim.Column_String_{String_: args[i]}}
+		columns = append(columns, col)
+	}
+
+	rowChannel, err := stub.GetRows(tableName, columns)
+	if err != nil {
+		return nil, fmt.Errorf("GetList operation failed. %s", err)
+	}
+	var rows []shim.Row
+	for {
+		select {
+		case row, ok := <-rowChannel:
+			if !ok {
+				rowChannel = nil
+			} else {
+				rows = append(rows, row)
+			}
+		}
+		if rowChannel == nil {
+			break
+		}
+	}
+
+	fmt.Println("Number of Keys retrieved : ", nKeys)
+	fmt.Println("Number of rows retrieved : ", len(rows))
+	return rows, nil
+}
+
 ///////////////////////////////////////////////////////////
 // Convert Image to []bytes and viceversa
 // Detect Image Filetype
@@ -780,4 +1077,31 @@ func JSONtoAR(data []byte) (ItemObject, error) {
 	}
 
 	return ar, err
+}
+
+//////////////////////////////////////////////////////////
+// Converts an User Object to a JSON String
+//////////////////////////////////////////////////////////
+func JSONtoAucReq(areq []byte) (AuctionRequest, error) {
+
+	ar := AuctionRequest{}
+	err := json.Unmarshal(areq, &ar)
+	if err != nil {
+		fmt.Println("JSONtoAucReq error: ", err)
+		return ar, err
+	}
+	return ar, err
+}
+
+//////////////////////////////////////////////////////////
+// Converts an Auction Request to a JSON String
+//////////////////////////////////////////////////////////
+func AucReqtoJSON(ar AuctionRequest) ([]byte, error) {
+
+	ajson, err := json.Marshal(ar)
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+	return ajson, nil
 }
